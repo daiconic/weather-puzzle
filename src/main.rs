@@ -50,7 +50,10 @@ fn main() {
         .add_systems(Startup, setup)
         .add_systems(PreUpdate, controls.after(bevy::input::InputSystems))
         .add_systems(FixedUpdate, transport)
-        .add_systems(Update, (drag_low, draw_weather, show_moisture).chain())
+        .add_systems(
+            Update,
+            (drag_low, draw_weather, show_moisture, show_status).chain(),
+        )
         .run();
 }
 
@@ -195,7 +198,10 @@ fn drag_low(
                 (p + offset).clamp(-MAP_HALF + Vec2::splat(38.), MAP_HALF - Vec2::splat(38.));
         }
     }
-    low_label.translation = weather.low.extend(5.);
+    let position = weather.low.extend(5.);
+    if low_label.translation != position {
+        low_label.translation = position;
+    }
 }
 
 fn draw_weather(mut gizmos: Gizmos, weather: Res<Weather>) {
@@ -249,6 +255,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn paused_updates_do_not_dirty_display_or_simulation() {
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins)
+            .init_resource::<Weather>()
+            .init_resource::<Moisture>()
+            .add_systems(Update, (transport, show_moisture, show_status).chain());
+        let cell = app
+            .world_mut()
+            .spawn((HumidityCell(0), Sprite::default()))
+            .id();
+        let status = app.world_mut().spawn((Status, Text2d::new(""))).id();
+        app.update();
+        app.world_mut().clear_trackers();
+        app.update();
+        assert!(
+            !app.world()
+                .get_entity(cell)
+                .unwrap()
+                .get_ref::<Sprite>()
+                .unwrap()
+                .is_changed()
+        );
+        assert!(
+            !app.world()
+                .get_entity(status)
+                .unwrap()
+                .get_ref::<Text2d>()
+                .unwrap()
+                .is_changed()
+        );
+        assert!(
+            !app.world()
+                .get_resource_ref::<Moisture>()
+                .unwrap()
+                .is_changed()
+        );
+
+        // Toggling the overlay must still redraw immediately while paused.
+        app.world_mut().resource_mut::<Moisture>().visible = false;
+        app.update();
+        assert_eq!(
+            app.world().get::<Sprite>(cell).unwrap().color,
+            Color::srgba(0.15, 0.85, 0.95, 0.)
+        );
+        assert!(
+            app.world()
+                .get::<Text2d>(status)
+                .unwrap()
+                .0
+                .contains("Overlay: OFF")
+        );
+    }
+
+    #[test]
     fn moving_low_changes_farm_wind() {
         let farm = Vec2::new(340., 0.);
         let before = wind_at(farm, INITIAL_LOW);
@@ -283,23 +343,51 @@ fn controls(
 }
 
 fn transport(weather: Res<Weather>, mut moisture: ResMut<Moisture>) {
-    moisture.advance(|p| wind_at(p, weather.low) * 75.);
+    // Avoid marking the resource changed while paused.
+    if moisture.running {
+        moisture.advance(|p| wind_at(p, weather.low) * 75.);
+    }
 }
 
-fn show_moisture(
-    moisture: Res<Moisture>,
-    mut cells: Query<(&HumidityCell, &mut Sprite)>,
-    mut status: Single<&mut Text2d, With<Status>>,
-) {
+fn show_moisture(moisture: Res<Moisture>, mut cells: Query<(&HumidityCell, &mut Sprite)>) {
+    if !moisture.is_changed() {
+        return;
+    }
     for (cell, mut sprite) in &mut cells {
         let alpha = if moisture.visible {
             moisture.values[cell.0] * 0.8
         } else {
             0.
         };
-        sprite.color = Color::srgba(0.15, 0.85, 0.95, alpha);
+        let color = Color::srgba(0.15, 0.85, 0.95, alpha);
+        if sprite.color != color {
+            sprite.color = color;
+        }
     }
-    status.0 = format!(
+}
+
+fn show_status(
+    moisture: Res<Moisture>,
+    time: Res<Time<Real>>,
+    mut previous: Local<Option<(bool, bool, f64)>>,
+    mut status: Single<&mut Text2d, With<Status>>,
+) {
+    let now = time.elapsed_secs_f64();
+    if let Some((running, visible, last_update)) = *previous {
+        // Buttons and reset update immediately; the running clock refreshes at 5 Hz.
+        if running == moisture.running
+            && visible == moisture.visible
+            && moisture.elapsed != 0.
+            && now - last_update < 0.2
+        {
+            return;
+        }
+        if !moisture.is_changed() && !moisture.running {
+            return;
+        }
+    }
+    *previous = Some((moisture.running, moisture.visible, now));
+    let text = format!(
         "{} | {:.1}s | Farm moisture: {:.0}% | Overlay: {}",
         if moisture.running {
             "RUNNING"
@@ -310,4 +398,7 @@ fn show_moisture(
         moisture.sample(Vec2::new(340., 0.)) * 100.,
         if moisture.visible { "ON" } else { "OFF" }
     );
+    if status.0 != text {
+        status.0 = text;
+    }
 }

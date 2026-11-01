@@ -7,3 +7,10 @@ rust-version = "1.97.1"
 [dependencies]
 bevy = { version = "=0.20.1", default-features = false, features = ["default_app", "std", "bevy_winit", "multi_threaded", "default_font", "2d_bevy_render"] }
 
+# Keep normal `cargo run` responsive while retaining debug information.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+

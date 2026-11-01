@@ -1,4 +1,6 @@
 use bevy::prelude::*;
+mod moisture;
+use moisture::Moisture;
 
 const HIGH: Vec2 = Vec2::new(-350., 110.);
 const INITIAL_LOW: Vec2 = Vec2::new(130., 150.);
@@ -24,13 +26,21 @@ impl Default for Weather {
 #[derive(Component)]
 struct LowLabel;
 
+#[derive(Component)]
+struct HumidityCell(usize);
+
+#[derive(Component)]
+struct Status;
+
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::srgb(0.035, 0.06, 0.09)))
         .init_resource::<Weather>()
+        .init_resource::<Moisture>()
+        .insert_resource(Time::<Fixed>::from_hz(30.))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Weather Lab | 01 - Wind".into(),
+                title: "Weather Lab | 02 - Moisture".into(),
                 resolution: (1100, 760).into(),
                 resizable: false,
                 ..default()
@@ -38,7 +48,9 @@ fn main() {
             ..default()
         }))
         .add_systems(Startup, setup)
-        .add_systems(Update, (drag_low, draw_weather).chain())
+        .add_systems(PreUpdate, controls.after(bevy::input::InputSystems))
+        .add_systems(FixedUpdate, transport)
+        .add_systems(Update, (drag_low, draw_weather, show_moisture).chain())
         .run();
 }
 
@@ -68,30 +80,38 @@ fn setup(mut commands: Commands) {
     );
     label(
         &mut commands,
-        "01 / SHAPE THE WIND",
+        "02 / CARRY THE MOISTURE",
         Vec2::new(310., 330.),
         19.,
         HIGH_COLOR,
     );
     label(
         &mut commands,
-        "Drag L to change the wind   /   R to reset",
+        "Drag L  /  Space: play-pause  /  R: reset  /  M: moisture",
         Vec2::new(0., -315.),
         20.,
         white,
     );
     label(
         &mut commands,
-        "Wind study: terrain is a backdrop. Clouds and rain come next.",
+        "Cyan = moisture: dark 0% -> bright 100%. Terrain does not affect flow yet.",
         Vec2::new(0., -345.),
         16.,
         Color::srgb(0.53, 0.65, 0.70),
     );
 
-    // 32 x 18 cells; heights will become simulation inputs in the next increment.
-    for y in 0..18 {
-        for x in 0..32 {
-            let p = Vec2::new(-465. + x as f32 * 30., -255. + y as f32 * 30.);
+    let status = label(
+        &mut commands,
+        "PAUSED | 0.0s | Farm moisture: 0%",
+        Vec2::new(0., 290.),
+        17.,
+        white,
+    );
+    commands.entity(status).insert(Status);
+    // An independent transparent layer keeps the underlying terrain inspectable.
+    for y in 0..moisture::HEIGHT {
+        for x in 0..moisture::WIDTH {
+            let p = moisture::position(x, y);
             let ridge = terrain_height(p);
             let color = if p.x < -225. {
                 Color::srgb(0.07, 0.23 + 0.025 * (y % 3) as f32, 0.34)
@@ -105,6 +125,11 @@ fn setup(mut commands: Commands) {
             commands.spawn((
                 Sprite::from_color(color, Vec2::splat(29.)),
                 Transform::from_translation(p.extend(0.)),
+            ));
+            commands.spawn((
+                Sprite::from_color(Color::NONE, Vec2::splat(29.)),
+                Transform::from_translation(p.extend(1.)),
+                HumidityCell(y * moisture::WIDTH + x),
             ));
         }
     }
@@ -153,14 +178,11 @@ fn wind_at(p: Vec2, low: Vec2) -> Vec2 {
 fn drag_low(
     mut weather: ResMut<Weather>,
     mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform), With<Camera2d>>,
     mut low_label: Single<&mut Transform, With<LowLabel>>,
 ) {
-    if keys.just_pressed(KeyCode::KeyR) {
-        *weather = Weather::default();
-    } else if !mouse.pressed(MouseButton::Left) || !window.focused {
+    if !mouse.pressed(MouseButton::Left) || !window.focused {
         weather.drag_offset = None;
     } else if let Some(cursor) = window.cursor_position()
         && let Ok(p) = camera.0.viewport_to_world_2d(camera.1, cursor)
@@ -240,4 +262,52 @@ mod tests {
             assert!(wind_at(p, INITIAL_LOW).is_finite());
         }
     }
+}
+
+fn controls(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut weather: ResMut<Weather>,
+    mut moisture: ResMut<Moisture>,
+) {
+    if keys.just_pressed(KeyCode::KeyR) {
+        *weather = Weather::default();
+        *moisture = Moisture::default();
+        return;
+    }
+    if keys.just_pressed(KeyCode::Space) {
+        moisture.running = !moisture.running;
+    }
+    if keys.just_pressed(KeyCode::KeyM) {
+        moisture.visible = !moisture.visible;
+    }
+}
+
+fn transport(weather: Res<Weather>, mut moisture: ResMut<Moisture>) {
+    moisture.advance(|p| wind_at(p, weather.low) * 75.);
+}
+
+fn show_moisture(
+    moisture: Res<Moisture>,
+    mut cells: Query<(&HumidityCell, &mut Sprite)>,
+    mut status: Single<&mut Text2d, With<Status>>,
+) {
+    for (cell, mut sprite) in &mut cells {
+        let alpha = if moisture.visible {
+            moisture.values[cell.0] * 0.8
+        } else {
+            0.
+        };
+        sprite.color = Color::srgba(0.15, 0.85, 0.95, alpha);
+    }
+    status.0 = format!(
+        "{} | {:.1}s | Farm moisture: {:.0}% | Overlay: {}",
+        if moisture.running {
+            "RUNNING"
+        } else {
+            "PAUSED"
+        },
+        moisture.elapsed,
+        moisture.sample(Vec2::new(340., 0.)) * 100.,
+        if moisture.visible { "ON" } else { "OFF" }
+    );
 }

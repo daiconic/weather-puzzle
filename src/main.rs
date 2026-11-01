@@ -40,7 +40,7 @@ fn main() {
         .insert_resource(Time::<Fixed>::from_hz(30.))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Weather Lab | 02 - Moisture".into(),
+                title: "Weather Lab | 03 - Rain".into(),
                 resolution: (1100, 760).into(),
                 resizable: false,
                 ..default()
@@ -52,7 +52,14 @@ fn main() {
         .add_systems(FixedUpdate, transport)
         .add_systems(
             Update,
-            (drag_low, draw_weather, show_moisture, show_status).chain(),
+            (
+                drag_low,
+                draw_weather,
+                draw_rain,
+                show_moisture,
+                show_status,
+            )
+                .chain(),
         )
         .run();
 }
@@ -83,7 +90,7 @@ fn setup(mut commands: Commands) {
     );
     label(
         &mut commands,
-        "02 / CARRY THE MOISTURE",
+        "03 / MAKE IT RAIN",
         Vec2::new(310., 330.),
         19.,
         HIGH_COLOR,
@@ -97,7 +104,7 @@ fn setup(mut commands: Commands) {
     );
     label(
         &mut commands,
-        "Cyan = moisture: dark 0% -> bright 100%. Terrain does not affect flow yet.",
+        "Cyan: moisture / Blue streaks: rain / Rain forms uphill and near L.",
         Vec2::new(0., -345.),
         16.,
         Color::srgb(0.53, 0.65, 0.70),
@@ -168,8 +175,12 @@ fn terrain_height(p: Vec2) -> f32 {
     ridge * ((p.y + 170.) / 95.).clamp(0., 1.)
 }
 
-// A deliberately simple game field, not an atmospheric forecast:
-// broad outward flow around H plus inward flow around L and a small westerly.
+fn low_uplift(p: Vec2, low: Vec2) -> f32 {
+    // A local game rule for converging air near L, independent of terrain uplift.
+    0.12 * (-(p - low).length_squared() / (120. * 120.)).exp()
+}
+
+// A game field: outward flow around H, inward flow around L, and a small westerly.
 fn wind_at(p: Vec2, low: Vec2) -> Vec2 {
     let away = p - HIGH;
     let toward = low - p;
@@ -304,7 +315,7 @@ mod tests {
                 .get::<Text2d>(status)
                 .unwrap()
                 .0
-                .contains("Overlay: OFF")
+                .contains("Moisture: OFF")
         );
     }
 
@@ -345,7 +356,11 @@ fn controls(
 fn transport(weather: Res<Weather>, mut moisture: ResMut<Moisture>) {
     // Avoid marking the resource changed while paused.
     if moisture.running {
-        moisture.advance(|p| wind_at(p, weather.low) * 75.);
+        moisture.advance_with_rain(
+            |p| wind_at(p, weather.low) * 75.,
+            terrain_height,
+            |p| low_uplift(p, weather.low),
+        );
     }
 }
 
@@ -388,7 +403,7 @@ fn show_status(
     }
     *previous = Some((moisture.running, moisture.visible, now));
     let text = format!(
-        "{} | {:.1}s | Farm moisture: {:.0}% | Overlay: {}",
+        "{} | {:.1}s | Farm: {:.0}% moist / {:.2} rain | Moisture: {}",
         if moisture.running {
             "RUNNING"
         } else {
@@ -396,9 +411,36 @@ fn show_status(
         },
         moisture.elapsed,
         moisture.sample(Vec2::new(340., 0.)) * 100.,
+        moisture.farm_rainfall(),
         if moisture.visible { "ON" } else { "OFF" }
     );
     if status.0 != text {
         status.0 = text;
+    }
+}
+
+fn draw_rain(mut gizmos: Gizmos, moisture: Res<Moisture>) {
+    // Freeze the animation with simulation time while paused.
+    for y in 0..moisture::HEIGHT {
+        for x in 0..moisture::WIDTH {
+            let rate = moisture.rain_rate[y * moisture::WIDTH + x];
+            if rate < 0.002 {
+                continue;
+            }
+            let intensity = (rate * 5.).clamp(0.15, 1.);
+            let color = Color::srgba(0.3, 0.55, 1., intensity);
+            let center = moisture::position(x, y);
+            for offset in [-8., 5.] {
+                let phase = (moisture.elapsed * 40. + x as f32 * 7. + y as f32 * 3. + offset)
+                    .rem_euclid(22.)
+                    - 11.;
+                let start = center + Vec2::new(offset, phase);
+                gizmos.line(
+                    start.extend(4.),
+                    (start + Vec2::new(-3., -7. - intensity * 5.)).extend(4.),
+                    color,
+                );
+            }
+        }
     }
 }

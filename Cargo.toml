@@ -1,0 +1,9 @@
+[package]
+name = "weather-puzzle"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+
+[dependencies]
+bevy = { version = "=0.20.1", default-features = false, features = ["default_app", "std", "bevy_winit", "multi_threaded", "default_font", "2d_bevy_render"] }
+
